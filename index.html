@@ -1,0 +1,233 @@
+<!DOCTYPE html><html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Midway Ford – Recall VIN Checker</title>
+<link rel="manifest" href='data:application/json,{"name":"Midway Ford Recall VIN Checker","short_name":"Recall Checker","start_url":".","display":"standalone","background_color":"#0b1220","theme_color":"#0b1220"}'>
+<style>
+  :root{--bg:#0b1220;--card:#111827;--ink:#e5e7eb;--muted:#9ca3af;--ok:#10b981;--warn:#f59e0b;--err:#ef4444;--accent:#3b82f6;--line:#273248}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--ink)}
+  header{position:sticky;top:0;background:rgba(11,18,32,.75);backdrop-filter:blur(6px);border-bottom:1px solid var(--line);z-index:10}
+  .wrap{max-width:920px;margin:0 auto;padding:14px}
+  h1{display:flex;align-items:center;gap:10px;font-size:18px;margin:0}
+  .brand{font-weight:800;letter-spacing:.4px}
+  main{padding:14px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .right{margin-left:auto}
+  button{background:#1f2937;color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-weight:600}
+  button:active{transform:translateY(1px)}
+  .hint{color:var(--muted);font-size:12px}
+  video{width:100%;max-width:720px;border-radius:16px;border:1px solid var(--line);background:#000}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px;margin-top:12px}
+  .list{display:grid;gap:10px}
+  .vin{font-family:ui-monospace,Menlo,Consolas,monospace;letter-spacing:.5px}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:#1f2937;border:1px solid var(--line);font-size:12px}
+  .ok{background:rgba(16,185,129,.12);border-color:#134e4a}
+  .bad{background:rgba(239,68,68,.12);border-color:#7f1d1d}
+  .unk{background:rgba(59,130,246,.12);border-color:#1e3a8a}
+  .tag{color:var(--muted);font-size:12px}
+  .small{font-size:12px}
+  .recall{border-left:3px solid var(--err);padding-left:8px;margin-top:6px}
+  a{color:var(--accent);text-decoration:none}
+  input{width:100%;background:#0b1220;color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+</style>
+</head>
+<body>
+  <header>
+    <div class="wrap row" style="justify-content:space-between">
+      <h1><span class="brand">Midway Ford</span> – Recall VIN Checker</h1>
+      <div class="row">
+        <button id="installBtn" hidden>Add to Home</button>
+      </div>
+    </div>
+  </header>  <main class="wrap">
+    <section class="card">
+      <div class="row">
+        <button id="start">Start Camera</button>
+        <button id="stop">Stop</button>
+        <button id="export">Export CSV</button>
+        <button id="clear">Clear List</button>
+        <span class="right tag">Tip: Aim at the <b>door‑jamb PDF417</b> label for fastest, most accurate scans.</span>
+      </div>
+      <video id="preview" playsinline muted></video>
+      <div class="row" style="margin-top:8px"><input id="manual" placeholder="Type/Paste VIN and press Enter"></div>
+      <div class="hint" style="margin-top:6px">After each scan, this app tries a VIN‑specific NHTSA recall lookup. If blocked by the API in your browser, use the <b>Verify</b> button for the official VIN page. For Ford CSP/FSA/SSM items, open OASIS (VIN copied).</div>
+    </section><section class="card">
+  <div class="row" style="justify-content:space-between">
+    <strong>Scanned VINs</strong>
+    <span class="tag"><span id="count">0</span> total</span>
+  </div>
+  <div id="list" class="list"></div>
+</section>
+
+<section class="card">
+  <details>
+    <summary><strong>Accuracy / Source</strong></summary>
+    <p class="small">NHTSA VIN page shows <u>open, unrepaired safety recalls</u> for that exact VIN. It does not list completed recalls or non‑safety programs. Use Ford OASIS for FSAs/CSPs and service actions.</p>
+  </details>
+</section>
+
+  </main>  <!-- ZXing: robust PDF417 and 1D scanning (UMD builds) -->  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.2/umd/index.min.js"></script>  <script src="https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js"></script>  <script>
+    // --- PWA install ---
+    let deferredPrompt; const installBtn = document.getElementById('installBtn');
+    window.addEventListener('beforeinstallprompt', (e)=>{ e.preventDefault(); deferredPrompt=e; installBtn.hidden=false; });
+    installBtn?.addEventListener('click', async ()=>{ if(!deferredPrompt) return; deferredPrompt.prompt(); await deferredPrompt.userChoice; deferredPrompt=null; installBtn.hidden=true; });
+
+    // --- State ---
+    const listEl = document.getElementById('list'), countEl = document.getElementById('count');
+    const vins = new Map(); // vin -> record
+    function load(){ try{ JSON.parse(localStorage.getItem('vins')||'[]').forEach(v=>vins.set(v.vin,v)); }catch{} }
+    function save(){ localStorage.setItem('vins', JSON.stringify([...vins.values()])); }
+    load();
+
+    function normVIN(s){ return (s||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,17); }
+    const has17 = s => normVIN(s).length===17;
+
+    function render(){
+      listEl.innerHTML='';
+      const arr = [...vins.values()].sort((a,b)=>(b.ts||0)-(a.ts||0));
+      countEl.textContent = String(arr.length);
+      for(const v of arr){
+        const cls = v.status==='OPEN' ? 'bad' : v.status==='NONE' ? 'ok' : 'unk';
+        const label = v.status==='OPEN' ? 'Recall: YES' : v.status==='NONE' ? 'Recall: NO' : 'Unknown';
+        const recallsHtml = (v.campaigns||[]).map(c=>`<div class="small recall">• ${c.id||''} — ${c.date||''} — ${c.component||''}</div>`).join('');
+        const ymm = [v.year,v.make,v.model].filter(Boolean).join(' ');
+        const verifyURL = `https://www.nhtsa.gov/recalls?vin=${encodeURIComponent(v.vin)}`;
+        const row = document.createElement('div'); row.className='card';
+        row.innerHTML = `
+          <div class="row" style="justify-content:space-between;align-items:flex-start">
+            <div>
+              <div class="vin">${v.vin}</div>
+              <div class="tag">${ymm||'—'}</div>
+              <div class="small">${new Date(v.ts).toLocaleTimeString()}</div>
+            </div>
+            <div class="row right">
+              <span class="pill ${cls}">${label}</span>
+              <a class="pill" target="_blank" href="${verifyURL}">Verify (NHTSA)</a>
+              <button class="pill" data-oasis="${v.vin}">Open OASIS</button>
+              <button class="pill" data-copy="${v.vin}">Copy VIN</button>
+              <button class="pill" data-del="${v.vin}">Remove</button>
+            </div>
+          </div>
+          <div>${recallsHtml || '<div class="small tag">No campaign details yet.</div>'}</div>`;
+        listEl.appendChild(row);
+      }
+    }
+    render();
+
+    listEl.addEventListener('click', async (e)=>{
+      const btn = e.target.closest('button'); if(!btn) return;
+      if(btn.dataset.copy){ await navigator.clipboard.writeText(btn.dataset.copy); btn.textContent='Copied'; setTimeout(()=>btn.textContent='Copy VIN',900); }
+      if(btn.dataset.del){ vins.delete(btn.dataset.del); save(); render(); }
+      if(btn.dataset.oasis){
+        // Copy VIN for quick paste, then open FMCDealer/PTS; deep VIN injection isn't exposed publicly.
+        try{ await navigator.clipboard.writeText(btn.dataset.oasis); }catch{}
+        window.open('https://www.fmcdealer.com/', '_blank');
+        alert('VIN copied to clipboard. After FMCDealer/PTS loads, open OASIS and paste into the VIN box.');
+      }
+    });
+
+    async function decodeYMM(v){
+      try{
+        const url = `https://vpic.nhtsa.dot.gov/api/vehicles/decodevinvalues/${encodeURIComponent(v)}?format=json`;
+        const r = await fetch(url); const j = await r.json(); const row = j?.Results?.[0]||{};
+        return {year: row.ModelYear||'', make: row.Make||'', model: row.Model||''};
+      }catch{return {};} }
+
+    async function checkVINRecall(v){
+      // Try VIN-specific first. Some browsers may block this; handle gracefully.
+      try{
+        const r = await fetch(`https://api.nhtsa.gov/recalls/recallsByVin?vin=${encodeURIComponent(v)}`);
+        if(r.ok){
+          const j = await r.json();
+          const items = j?.results || j?.Results || [];
+          if(Array.isArray(items) && items.length){
+            return {status:'OPEN', campaigns: items.map(x=>({id:x.NHTSACampaignNumber||x.campaignNumber||'', component:x.Component||x.ComponentDescription||'', date:x.ReportReceivedDate||x.reportReceivedDate||''}))};
+          } else {
+            return {status:'NONE', campaigns:[]};
+          }
+        }
+      }catch(e){ /* fall back below */ }
+      return {status:'UNKNOWN', campaigns:[]};
+    }
+
+    async function addVIN(raw){
+      const vin = normVIN(raw); if(!has17(vin)) return;
+      if(!vins.has(vin)) vins.set(vin,{vin});
+      const rec = vins.get(vin); rec.ts=Date.now(); rec.status='CHECKING'; rec.campaigns=[]; save(); render();
+      Object.assign(rec, await decodeYMM(vin)); save(); render();
+      Object.assign(rec, await checkVINRecall(vin)); save(); render();
+    }
+
+    document.getElementById('manual').addEventListener('keydown', e=>{ if(e.key==='Enter'){ addVIN(e.target.value); e.target.value=''; }});
+
+    // --- Camera (ZXing first, then BarcodeDetector fallback) ---
+    const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop'), video=document.getElementById('preview');
+    let codeReader, controls, running=false;
+
+    async function startZXing(){
+      const ZX = window.ZXing; const ZXB = window.ZXingBrowser;
+      if(!ZX || !ZXB) throw new Error('ZXing libs not available');
+      const hints = new ZX.CommonHybridBinarizer(); // just touch ZX so it loads
+      const formats = [ZX.BarcodeFormat.PDF_417, ZX.BarcodeFormat.CODE_39, ZX.BarcodeFormat.CODE_128];
+      codeReader = new ZXB.BrowserMultiFormatReader();
+      const devices = await ZXB.BrowserCodeReader.listVideoInputDevices();
+      const back = devices.find(d=>/back|rear|environment/i.test(d.label))?.deviceId;
+      controls = await codeReader.decodeFromVideoDevice(back||undefined, video, (res)=>{
+        if(res){
+          const text = res.getText();
+          const candidate = (text.match(/[A-HJ-NPR-Z0-9]{11,17}/g)||[])[0] || text;
+          const vin = normVIN(candidate);
+          if(has17(vin) && !vins.has(vin)){
+            addVIN(vin);
+            // prevent rapid duplicates
+            codeReader.reset(); setTimeout(()=>startZXing(), 350);
+          }
+        }
+      }, {videoConstraints:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}});
+    }
+
+    async function startNative(){
+      if(!('BarcodeDetector' in window)) throw new Error('BarcodeDetector not supported');
+      const detector = new BarcodeDetector({formats:['pdf417','code_39','code_128']});
+      const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}}});
+      video.srcObject = stream; await video.play(); running=true;
+      (async function loop(){
+        while(running){
+          try{
+            const codes = await detector.detect(video);
+            for(const c of codes){
+              const candidate=(c.rawValue||c.displayValue||'');
+              const vin = normVIN(candidate);
+              if(has17(vin) && !vins.has(vin)){ addVIN(vin); await new Promise(r=>setTimeout(r,350)); }
+            }
+          }catch{}
+          await new Promise(r=>setTimeout(r,120));
+        }
+      })();
+    }
+
+    async function startCamera(){
+      try{ await startZXing(); }
+      catch(e1){
+        try{ await startNative(); }
+        catch(e2){ alert('Camera start failed. Use Chrome/Edge on Android, or enter VIN manually.\n'+(e1?.message||'')+'\n'+(e2?.message||'')); }
+      }
+    }
+
+    function stopCamera(){ try{ running=false; controls&&controls.stop(); codeReader&&codeReader.reset(); }catch{} video.srcObject=null; }
+
+    startBtn.addEventListener('click', startCamera);
+    stopBtn.addEventListener('click', stopCamera);
+
+    // Export & Clear
+    document.getElementById('export').addEventListener('click', ()=>{
+      const rows=[['VIN','Year','Make','Model','Status','Campaigns']];
+      for(const v of vins.values()) rows.push([v.vin,v.year||'',v.make||'',v.model||'',v.status||'',(v.campaigns||[]).map(c=>c.id).join(' | ')]);
+      const blob=new Blob([rows.map(r=>r.map(x=>`"${String(x).replaceAll('"','""')}"`).join(',')).join('\n')],{type:'text/csv'});
+      const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='midway_recall_scan.csv'; a.click();
+    });
+    document.getElementById('clear').addEventListener('click', ()=>{ if(confirm('Clear scanned list?')){ localStorage.removeItem('vins'); vins.clear(); render(); }});
+  </script></body>
+</html>
